@@ -419,7 +419,11 @@ class Statement(TokenList):
         isn't a DML or DDL keyword "UNKNOWN" is returned.
 
         Whitespaces and comments at the beginning of the statement
-        are ignored.
+        are ignored. A statement enclosed in parentheses (e.g. a
+        parenthesized query used in a UNION reconciliation or a
+        parenthesized INSERT) is unwrapped, so the first DML/DDL keyword
+        inside the parentheses determines the type. Parentheses may be
+        nested and may be followed by set operators (UNION, EXCEPT, ...).
         """
         token = self.token_first(skip_cm=True)
         if token is None:
@@ -431,20 +435,60 @@ class Statement(TokenList):
             return token.normalized
 
         elif token.ttype == T.Keyword.CTE:
-            # The WITH keyword should be followed by either an Identifier or
-            # an IdentifierList containing the CTE definitions;  the actual
-            # DML keyword (e.g. SELECT, INSERT) will follow next.
-            tidx = self.token_index(token)
-            while tidx is not None:
-                tidx, token = self.token_next(tidx, skip_ws=True)
-                if isinstance(token, (Identifier, IdentifierList)):
-                    tidx, token = self.token_next(tidx, skip_ws=True)
+            return self._get_type_after_cte(token)
 
-                    if token is not None \
-                            and token.ttype == T.Keyword.DML:
-                        return token.normalized
+        elif isinstance(token, Parenthesis):
+            # A statement wrapped in parentheses (possibly nested, or
+            # combined with set operators such as UNION): look through
+            # the parentheses instead of classifying it as UNKNOWN.
+            return self._get_type_from_parenthesis(token)
 
         # Hmm, probably invalid syntax, so return unknown.
+        return 'UNKNOWN'
+
+    def _get_type_after_cte(self, token):
+        # The WITH keyword should be followed by either an Identifier or
+        # an IdentifierList containing the CTE definitions;  the actual
+        # DML keyword (e.g. SELECT, INSERT) will follow next.
+        group = token.parent
+        tidx = group.token_index(token)
+        while tidx is not None:
+            tidx, next_token = group.token_next(tidx, skip_ws=True)
+            if isinstance(next_token, (Identifier, IdentifierList)):
+                tidx, next_token = group.token_next(tidx, skip_ws=True)
+
+                if (next_token is not None
+                        and next_token.ttype == T.Keyword.DML):
+                    return next_token.normalized
+
+        return 'UNKNOWN'
+
+    def _get_type_from_parenthesis(self, parens):
+        # Unwrap parenthesized statements, including nested ones, until
+        # the first meaningful keyword is found. The opening and closing
+        # parenthesis tokens themselves are skipped. Everything inside
+        # one pair of parentheses belongs to a single statement, so the
+        # leading keyword there (e.g. MERGE before its WHEN ... UPDATE
+        # clause) takes precedence over later keywords.
+        while isinstance(parens, Parenthesis):
+            token = None
+            for child in parens.tokens:
+                if not (child.is_whitespace
+                        or imt(child, t=T.Comment, i=Comment)
+                        or child.match(T.Punctuation, ('(', ')'))):
+                    token = child
+                    break
+            if token is None:
+                # Empty parentheses "()" don't contain a statement.
+                return 'UNKNOWN'
+            elif token.ttype in (T.Keyword.DML, T.Keyword.DDL):
+                return token.normalized
+            elif token.ttype == T.Keyword.CTE:
+                return self._get_type_after_cte(token)
+            elif not isinstance(token, Parenthesis):
+                return 'UNKNOWN'
+            parens = token
+
         return 'UNKNOWN'
 
 

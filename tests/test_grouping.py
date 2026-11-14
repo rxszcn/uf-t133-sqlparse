@@ -427,6 +427,45 @@ def test_statement_get_type():
     assert f('foo').get_type() == 'UNKNOWN'
 
 
+@pytest.mark.parametrize('sql, expected', [
+    # Fully wrapped in parentheses: type is detected through the
+    # parentheses for every DML/DDL keyword.
+    ('(SELECT 1)', 'SELECT'),
+    ('(INSERT INTO foo VALUES (1))', 'INSERT'),
+    ('(UPDATE foo SET x = 1)', 'UPDATE'),
+    ('(DELETE FROM foo)', 'DELETE'),
+    ('(MERGE INTO foo USING bar ON 1 = 1 '
+     'WHEN MATCHED THEN UPDATE SET x = 1)', 'MERGE'),
+    # Wrapped in parentheses with a set operator inside.
+    ('(SELECT 1 UNION SELECT 2)', 'SELECT'),
+    # Parenthesized operands combined with a set operator at top level.
+    ('(SELECT 1) UNION (SELECT 2)', 'SELECT'),
+    ('(SELECT 1) UNION ALL (SELECT 2)', 'SELECT'),
+    ('(SELECT 1) EXCEPT (SELECT 2)', 'SELECT'),
+    ('(SELECT 1) INTERSECT (SELECT 2)', 'SELECT'),
+    # Nested parentheses.
+    ('((SELECT 1))', 'SELECT'),
+    # CTE prefix inside parentheses.
+    ('(WITH x AS (SELECT 1) SELECT * FROM x)', 'SELECT'),
+    ('((WITH x AS (SELECT 1) SELECT * FROM x))', 'SELECT'),
+    # CREATE ... AS SELECT keeps CREATE instead of falling back to SELECT.
+    ('(CREATE TABLE t AS SELECT 1)', 'CREATE'),
+    # Comments and whitespace: leading statement comments, comments
+    # inside the parentheses, and leading whitespace.
+    ('-- c\n(SELECT 1)', 'SELECT'),
+    ('/* c */(SELECT 1)', 'SELECT'),
+    ('(-- c\nSELECT 1)', 'SELECT'),
+    ('  (select 1)', 'SELECT'),
+    # Non-SQL word chunks and empty parentheses stay UNKNOWN.
+    ('()', 'UNKNOWN'),
+    ('(foo)', 'UNKNOWN'),
+    ('(1 + 2)', 'UNKNOWN'),
+])
+def test_statement_get_type_parenthesized(sql, expected):
+    parsed = sqlparse.parse(sql)[0]
+    assert parsed.get_type() == expected
+
+
 def test_identifier_with_operators():
     # issue 53
     p = sqlparse.parse('foo||bar')[0]
